@@ -10,8 +10,10 @@ Copyright: (c) consider it GmbH, 2021
 
 import argparse
 import logging
-from math import sqrt
 import sys
+import json
+from urllib.parse import urlparse
+import paho.mqtt.client as paho
 import pymavlink.mavlink as mavlink
 import pymavlink.mavutil as mavutil
 
@@ -34,9 +36,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='MAVLink GNSS Status Display')
     parser.add_argument("-i", "--input", required=True,
-                        help="connection address to FMU, e.g. /dev/ttyx, tcp:$ip:$port, udpin:$ip:$port")
-    parser.add_argument("-b", "--baud", type=int, default=115200,
-                        help="baud rate (only for uart, default 115200)")
+                        help="MQTT URL, e.g. tcp://localhos:1883/topicname")
     parser.add_argument("-o", "--output", required=True,
                         help="connection address for ADS-B data, e.g. tcp:$ip:$port, udpout:$ip:$port")
     parser.add_argument("-s", "--sysID", type=int,
@@ -53,36 +53,22 @@ if __name__ == "__main__":
         logger.setLevel(logging.WARNING)
 
     # SETUP
-    # open connection to the FMU
+    # open MQTT connection
+    mqtt_url = urlparse(args.input)
+    if len(mqtt_url.path) <= 1:  # just a '/' is not enough
+        logger.error("MQTT URL must contain a topic as URL path")
+        sys.exit()
+    mqtt_host = mqtt_url.netloc[0:mqtt_url.netloc.find(":")]
+    mqtt_port = int(mqtt_url.netloc[mqtt_url.netloc.find(":")+1:])
+    mqtt_topic = mqtt_url.path[1:]
+
+    logger.info("Starting MQTT connection to %s:%i, topic '%s'", mqtt_host, mqtt_port, mqtt_topic)
+    mqtt_client = paho.Client()
+    mqtt_client.connect(mqtt_host, port=mqtt_port)
+
+    # open MAVLink output
+    logger.info("Starting MAVLink connection to %s", args.output)
     try:
-        mav_in = mavutil.mavlink_connection(
-            args.input, baud=args.baud, source_system=OWN_SYSID, source_component=OWN_COMPID)
-    except OSError:
-        logger.error("MAVLink connection failed, exiting")
-        sys.exit(-1)
-
-    # when udpout, start with sending a heartbeat
-    if args.input.startswith('udpout:'):
-        i = 0
-        logger.info("UDP out: sending heartbeat to initilize a connection")
-        while True:
-            mav_in.mav.heartbeat_send(OWN_SYSID, OWN_COMPID, base_mode=0,
-                                      custom_mode=0, system_status=0)
-            i += 1
-
-            msg = mav_in.recv_match(type='HEARTBEAT', blocking=True, timeout=1)
-            if msg is not None:
-                break
-
-            if i >= UDP_CONNECT_TIMEOUT:
-                logger.error("UDP out: nothing received, terminating")
-                sys.exit(-1)
-
-            logger.debug("UDP out: retrying heartbeat")
-
-    # open connection to the FMU
-    try:
-        # TODO: which sysID and compID should we use?
         mav_out = mavutil.mavlink_connection(
             args.output, source_system=OWN_SYSID, source_component=OWN_COMPID)
     except OSError:
@@ -90,38 +76,38 @@ if __name__ == "__main__":
         sys.exit(-1)
 
     # RUN
-    while True:
-        msg = mav_in.recv_match(type='GLOBAL_POSITION_INT', blocking=True)
-        logger.debug("Message from %d/%d: %s", msg.get_srcSystem(), msg.get_srcComponent(), msg)
+    def on_message(client, userdata, msg):
+        logger.debug("IN: %s", msg.payload.decode())
 
-        # just evaluate messages from specific system, if requested
-        if args.sysID is not None and msg.get_srcSystem() != args.sysID:
-            logger.debug("Ignore message from system %d", msg.get_srcSystem())
-            continue
+        data = json.loads(msg.payload)
 
         # fill ADSB_VEHICLE message and send
-        hor_vel = int(sqrt(msg.vx ** 2 + msg.vy ** 2))
         adsb_callsign = bytes(ADSB_CALLSIGN, 'ascii')
         adbs_flags = mavlink.ADSB_FLAGS_VALID_COORDS + \
             mavlink.ADSB_FLAGS_VALID_ALTITUDE + \
             mavlink.ADSB_FLAGS_VALID_HEADING + \
             mavlink.ADSB_FLAGS_VALID_VELOCITY + \
             mavlink.ADSB_FLAGS_VALID_CALLSIGN + \
-            mavlink.ADSB_FLAGS_VALID_SQUAWK + \
-            mavlink.ADSB_FLAGS_VERTICAL_VELOCITY_VALID
-        # TODO: What information is actually valid
+            mavlink.ADSB_FLAGS_VALID_SQUAWK
 
-        msg_out = mavlink.MAVLink_adsb_vehicle_message(ADSB_ICAO_ADDR,      # ICAO_address (uint32_t)
-                                                       msg.lat, msg.lon,    # lan, lon (int32_t, degE7)
-                                                       1,                   # altitude_type (uint8_t, 0=QNH, 1=GNSS)
-                                                       msg.alt,             # altitude (uint32_t, mm)
-                                                       msg.hdg,             # heading (uint16_t, cdeg)
-                                                       hor_vel,             # hor_velocity (uint16_t, cm/s)
-                                                       -msg.vz,             # ver_velocity (int16_t, cm/s, positive up)
-                                                       adsb_callsign,       # callsign (char[9])
-                                                       ADSB_EMITTER_TYPE,   # emitter_type (uint8_t)
-                                                       0,  # TODO: time since last contact (uint8_t, s)
-                                                       adbs_flags,          # flags (uint16_t)
-                                                       ADSB_SQUAWK)         # squawk (uint16_t)
-        mav_out.mav.send(msg_out)
-        logger.debug("Message sent %d/%d: %s", msg.get_srcSystem(), msg.get_srcComponent(), msg_out)
+        adsb = mavlink.MAVLink_adsb_vehicle_message(
+            ADSB_ICAO_ADDR,                             # ICAO_address (uint32_t)
+            int(data["gnss"]["latitude"]*10000000),     # lat (int32_t, degE7)
+            int(data["gnss"]["longitude"]*10000000),    # lon (int32_t, degE7)
+            1,                                          # altitude type (0=QNH, 1=GNSS)
+            int(data["gnss"]["altitude_m"]*1000),       # altitude (uint32_t, mm)
+            int(data["gnss"]["heading_deg"]*100),       # heading (uint16_t, cdeg)
+            int(data["gnss"]["speed_mps"]*100),         # hor_vel (uint16_t, cm/s)
+            0,                                          # ver_vel (int16_t, cm/s, positive up)
+            adsb_callsign,                              # callsign (char[9])
+            ADSB_EMITTER_TYPE,                          # emitter_type (uint8_t)
+            0,                                          # TODO: time since last contact (uint8_t, s)
+            adbs_flags,                                 # flags (uint16_t)
+            ADSB_SQUAWK)                                # squawk (uint16_t)
+        mav_out.mav.send(adsb)
+        logger.info("OUT: %s", adsb)
+
+    mqtt_client.subscribe(mqtt_topic)
+    mqtt_client.user_data_set(mav_out)
+    mqtt_client.on_message = on_message
+    mqtt_client.loop_forever()
