@@ -12,6 +12,7 @@ import argparse
 import logging
 import sys
 import json
+import time
 from urllib.parse import urlparse
 import paho.mqtt.client as paho
 import pymavlink.mavlink as mavlink
@@ -62,9 +63,9 @@ if __name__ == "__main__":
     mqtt_port = int(mqtt_url.netloc[mqtt_url.netloc.find(":")+1:])
     mqtt_topic = mqtt_url.path[1:]
 
-    logger.info("Starting MQTT connection to %s:%i, topic '%s'", mqtt_host, mqtt_port, mqtt_topic)
-    mqtt_client = paho.Client()
-    mqtt_client.connect(mqtt_host, port=mqtt_port)
+    # logger.info("Starting MQTT connection to %s:%i, topic '%s'", mqtt_host, mqtt_port, mqtt_topic)
+    # mqtt_client = paho.Client()
+    # mqtt_client.connect(mqtt_host, port=mqtt_port)
 
     # open MAVLink output
     logger.info("Starting MAVLink connection to %s", args.output)
@@ -107,7 +108,23 @@ if __name__ == "__main__":
         mav_out.mav.send(adsb)
         logger.info("OUT: %s", adsb)
 
-    mqtt_client.subscribe(mqtt_topic)
-    mqtt_client.user_data_set(mav_out)
-    mqtt_client.on_message = on_message
-    mqtt_client.loop_forever()
+    # mqtt_client.subscribe(mqtt_topic)
+
+    heading = 0
+    while True:
+        heading = heading + 0.1
+        if heading >= 360:
+            heading = 0
+
+        json_msg = {'gnss': {'latitude': 53.542566399999998,
+                             "longitude": 9.9850910000000006,
+                             "altitude_m": 497.0,
+                             "speed_mps": 0,
+                             "heading_deg": heading}}
+
+        msg = paho.MQTTMessage()
+        msg.payload = str.encode(json.dumps(json_msg))
+        msg.topic = str.encode(mqtt_topic)
+        on_message(None, None, msg)
+
+        time.sleep(0.1)
