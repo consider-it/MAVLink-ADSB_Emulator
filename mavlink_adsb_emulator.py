@@ -9,10 +9,12 @@ Copyright: (c) consider it GmbH, 2021
 """
 
 import argparse
+import csv
 import logging
 import sys
 import json
 from urllib.parse import urlparse
+from datetime import datetime
 import paho.mqtt.client as paho
 import pymavlink.mavlink as mavlink
 import pymavlink.mavutil as mavutil
@@ -20,6 +22,8 @@ import pymavlink.mavutil as mavutil
 OWN_SYSID = 255
 OWN_COMPID = 0
 UDP_CONNECT_TIMEOUT = 10
+
+D2X_RECEPTION_CSV = "./d2x-reception-air2x.csv"
 
 # TODO: fill this information or un-set the flags (down below)
 ADSB_ICAO_ADDR = 1234  # uint32_t
@@ -75,6 +79,13 @@ if __name__ == "__main__":
         logger.error("MAVLink connection failed, exiting")
         sys.exit(-1)
 
+    # save start time for GLOBAL_POSITION_INT timestamp
+    startTime = datetime.now()
+    csvfile = open(D2X_RECEPTION_CSV, 'w', newline='')
+    d2xLogWriter = csv.writer(csvfile, dialect='excel')
+
+    d2xLogWriter.writerow(['type', 'time_ms', 'lat_degE7', 'lon_degE7', 'alt_mm'])
+
     # RUN
     def on_message(client, userdata, msg):
         logger.debug("IN: %s", msg.payload.decode())
@@ -106,6 +117,29 @@ if __name__ == "__main__":
             ADSB_SQUAWK)                                # squawk (uint16_t)
         mav_out.mav.send(adsb)
         logger.info("OUT: %s", adsb)
+
+        # fill GLOBAL_POSITION_INT for "D2X Reception Heatmap"
+        timeDiff = datetime.now() - startTime
+
+        globalPos = mavlink.MAVLink_global_position_int_message(
+            int(timeDiff.total_seconds() * 1000),       # time boot (uint32_t, ms)
+            int(data["gnss"]["latitude"]*10000000),     # lat (int32_t, degE7)
+            int(data["gnss"]["longitude"]*10000000),    # lon (int32_t, degE7)
+            int(data["gnss"]["altitude_m"]*1000),       # altitude (uint32_t, mm)
+            int(data["gnss"]["altitude_m"]*1000),       # altitude (uint32_t, mm)
+            0,                                          # vx (int16_t, cm/s)
+            0,                                          # vy (int16_t, cm/s)
+            0,                                          # vz (int16_t, cm/s)
+            0                                           # heading (uint16_t, cdeg)
+        )
+        mav_out.mav.send(globalPos)
+
+        # write CSV log for "D2X Reception Heatmap"
+        d2xLogWriter.writerow(['tx',
+                               int(timeDiff.total_seconds() * 1000),
+                               int(data["gnss"]["latitude"] * 10000000),
+                               int(data["gnss"]["longitude"]*10000000),
+                               int(data["gnss"]["altitude_m"]*1000)])
 
     mqtt_client.subscribe(mqtt_topic)
     mqtt_client.user_data_set(mav_out)
