@@ -79,7 +79,7 @@ if __name__ == "__main__":
     def on_message(client, userdata, msg):
         logger.debug("IN: %s", msg.payload.decode())
 
-        data = json.loads(msg.payload)
+        data = json.loads(msg.payload.decode())
 
         # fill ADSB_VEHICLE message and send
         adsb_callsign = bytes(ADSB_CALLSIGN, 'ascii')
