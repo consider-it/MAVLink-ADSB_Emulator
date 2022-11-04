@@ -6,6 +6,7 @@ Generate MAVLink ADSB_VEHICLE messages from PX4 telemetry.
 
 Author:    Jannik Beyerstedt <beyerstedt@consider-it.de>
 Copyright: (c) consider it GmbH, 2021
+License:   MIT
 """
 
 import argparse
